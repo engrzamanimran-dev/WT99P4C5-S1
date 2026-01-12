@@ -11,6 +11,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_spiffs.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -195,12 +197,19 @@ esp_err_t bsp_sdcard_sdmmc_mount(bsp_sdcard_cfg_t *cfg)
         return ret;
     }
     cfg->host->pwr_ctrl_handle = pwr_ctrl_handle;
+    ESP_LOGI(TAG, "SD on-chip LDO control acquired");
+    /* wait a short time for power rail to stabilize */
+    vTaskDelay(pdMS_TO_TICKS(10));
 
 #if !CONFIG_FATFS_LONG_FILENAMES
     ESP_LOGW(TAG, "Warning: Long filenames on SD card are disabled in menuconfig!");
 #endif
 
-    return esp_vfs_fat_sdmmc_mount(BSP_SD_MOUNT_POINT, cfg->host, cfg->slot.sdmmc, cfg->mount, &bsp_sdcard);
+    esp_err_t mount_ret = esp_vfs_fat_sdmmc_mount(BSP_SD_MOUNT_POINT, cfg->host, cfg->slot.sdmmc, cfg->mount, &bsp_sdcard);
+    if (mount_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount SD card (%s)", esp_err_to_name(mount_ret));
+    }
+    return mount_ret; 
 }
 
 esp_err_t bsp_sdcard_sdspi_mount(bsp_sdcard_cfg_t *cfg)
@@ -245,10 +254,17 @@ esp_err_t bsp_sdcard_sdspi_mount(bsp_sdcard_cfg_t *cfg)
         return ret;
     }
     cfg->host->pwr_ctrl_handle = pwr_ctrl_handle;
+    ESP_LOGI(TAG, "SD on-chip LDO control acquired");
+    /* wait a short time for power rail to stabilize */
+    vTaskDelay(pdMS_TO_TICKS(10));
 
     ESP_LOGW(TAG, "Warning: Long filenames on SD card are disabled in menuconfig!");
 
-    return esp_vfs_fat_sdspi_mount(BSP_SD_MOUNT_POINT, cfg->host, cfg->slot.sdspi, cfg->mount, &bsp_sdcard);
+    esp_err_t mount_ret = esp_vfs_fat_sdspi_mount(BSP_SD_MOUNT_POINT, cfg->host, cfg->slot.sdspi, cfg->mount, &bsp_sdcard);
+    if (mount_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to mount SD card (%s)", esp_err_to_name(mount_ret));
+    }
+    return mount_ret;
 }
 
 esp_err_t bsp_sdcard_mount(void)
@@ -513,15 +529,23 @@ esp_err_t bsp_display_backlight_on(void)
 static esp_err_t bsp_enable_dsi_phy_power(void)
 {
     // Turn on the power for MIPI DSI PHY, so it can go from "No Power" state to "Shutdown" state
+    int desired_mv = BSP_MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV;
+    if (desired_mv < 500 || desired_mv > 2700) {
+        ESP_LOGW(TAG, "Configured DSI PHY LDO voltage %d mV is out of recommended range [500, 2700], clamping", desired_mv);
+        desired_mv = (desired_mv < 500) ? 500 : 2700;
+    }
     esp_ldo_channel_config_t ldo_cfg = {
         .chan_id = BSP_MIPI_DSI_PHY_PWR_LDO_CHAN,
-        .voltage_mv = BSP_MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV,
+        .voltage_mv = desired_mv,
     };
     ESP_RETURN_ON_ERROR(esp_ldo_acquire_channel(&ldo_cfg, &disp_phy_pwr_chan), TAG, "Acquire LDO channel for DPHY failed");
+    ESP_LOGI(TAG, "MIPI DSI PHY LDO channel %d acquired, target voltage %d mV", BSP_MIPI_DSI_PHY_PWR_LDO_CHAN, desired_mv);
+    /* give the regulator some time to settle */
+    vTaskDelay(pdMS_TO_TICKS(10));
     ESP_LOGI(TAG, "MIPI DSI PHY Powered on");
 
     return ESP_OK;
-}
+} 
 
 esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_handle_t *ret_panel, esp_lcd_panel_io_handle_t *ret_io)
 {
